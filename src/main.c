@@ -14,7 +14,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-static volatile sig_atomic_t childDead = 0;    // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+static volatile sig_atomic_t childDead    = 0;    // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+static volatile sig_atomic_t shuttingDown = 0;    // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
 #define PORT 8080
 #define BUFFER_SIZE 1024
@@ -89,8 +90,6 @@ void handleConnect(int sockfd)
         printf("URI: %s\n", uri);
         printf("Version: %s\n", version);
 
-        // Step 1: Check if handler.so was updated
-
         if(stat("sharedLib.so", &st) == 0 && st.st_mtime != lastTime)
         {
             if(libHandle)
@@ -110,8 +109,6 @@ void handleConnect(int sockfd)
             printf("sharedLib.so reloaded\n");
         }
 
-        // Step 2: Get function pointer
-
         *(void **)(&handle_request_func) = dlsym(libHandle, "handleRequest");
         if(!handle_request_func)
         {
@@ -120,7 +117,6 @@ void handleConnect(int sockfd)
             continue;
         }
 
-        // Step 3: Call request handler from shared library
         handle_request_func(newsockfd, method, uri, buffer);
 
         close(newsockfd);
@@ -135,6 +131,13 @@ void sigChildHandle(int sig)
     childDead = 1;
 }
 
+void sigHandler(int sig)
+{
+    (void)sig;
+    shuttingDown = 1;
+    printf("shutting down...\n");
+}
+
 int main(void)
 {
     int                sockfd;
@@ -143,6 +146,7 @@ int main(void)
     int                status;
     pid_t              pid;
     struct sigaction   action;
+    struct sigaction   shutDown;
 
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if(sockfd == -1)
@@ -187,6 +191,21 @@ int main(void)
     action.sa_flags = SA_RESTART;
     sigaction(SIGCHLD, &action, NULL);
 
+#if defined(__clang__)
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Wdisabled-macro-expansion"
+#endif
+
+    shutDown.sa_handler = sigHandler;
+
+#if defined(__clang__)
+    #pragma clang diagnostic pop
+#endif
+
+    sigemptyset(&shutDown.sa_mask);
+    shutDown.sa_flags = SA_RESTART;
+    sigaction(SIGINT, &shutDown, NULL);
+
     for(int i = 0; i < NUM_OF_CHILDS; i++)
     {
         pid = fork();
@@ -203,7 +222,7 @@ int main(void)
         }
     }
 
-    while(1)
+    while(!shuttingDown)
     {
         pause();
 
@@ -226,6 +245,17 @@ int main(void)
             }
         }
     }
+
+    printf("killing all workers\n");
+    kill(0, SIGTERM);
+
+    while(wait(NULL) > 0)
+    {
+    }
+
+    close(sockfd);
+    printf("server has been murdered\n");
+    return EXIT_SUCCESS;
 
     return EXIT_SUCCESS;
 }
